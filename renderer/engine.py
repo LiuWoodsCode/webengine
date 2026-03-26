@@ -128,7 +128,7 @@ class Vivienne:
 
     def _parse_stream(self, html: str, base_url: str | None):
         tokenizer = HTMLTokenizer()
-        tree = HTMLTreeBuilder()
+        tree = HTMLTreeBuilder(scripting_enabled=bool(self.settings.get("js_enabled", True)))
         discovery = ResourceDiscovery()
         meta = RenderMetadata()
 

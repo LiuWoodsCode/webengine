@@ -1,4 +1,5 @@
 import logging
+import urllib.error
 import urllib.request
 
 from flags import resolve_bool_flag
@@ -6,11 +7,14 @@ from ua_gen import build_user_agent
 
 log = logging.getLogger("Charlie")
 
+DEFAULT_TIMEOUT_SECONDS = 15.0
+
 
 class Charlie:
-    def __init__(self, proxy_mode: str = "system"):
+    def __init__(self, proxy_mode: str = "system", timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS):
         self._proxy_mode = None
         self._opener = None
+        self._timeout_seconds = float(timeout_seconds)
         self.set_proxy_mode(proxy_mode)
 
     def set_proxy_mode(self, proxy_mode: str):
@@ -30,18 +34,53 @@ class Charlie:
             handler = urllib.request.ProxyHandler()
         return urllib.request.build_opener(handler)
 
-    def fetch_text(self, url: str):
-        log.info("fetching text url: %s", url)
+    def _normalize_url(self, url: str) -> str:
         if not url.startswith(("http://", "https://")):
             url = "http://" + url
             log.debug("normalized url to %s", url)
+        return url
 
-        ua = build_user_agent("0.3") if resolve_bool_flag("charlie_use_generated_ua", default_value=False) else "tinybrowser/0.3 (hand-rolled engine)"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": ua},
+    def _user_agent(self) -> str:
+        if resolve_bool_flag("charlie_use_generated_ua", default_value=False):
+            return build_user_agent("0.3")
+        return "tinybrowser/0.3 (hand-rolled engine)"
+
+    def _request(self, url: str, method: str = "GET") -> urllib.request.Request:
+        return urllib.request.Request(
+            self._normalize_url(url),
+            method=method,
+            headers={"User-Agent": self._user_agent()},
         )
-        with self._opener.open(req) as resp:
+
+    def _open(self, req: urllib.request.Request):
+        return self._opener.open(req, timeout=self._timeout_seconds)
+
+    def _headers_to_dict(self, headers) -> dict[str, str]:
+        if headers is None:
+            return {}
+        items = getattr(headers, "items", None)
+        if callable(items):
+            return {str(k): str(v) for k, v in items()}
+        return {
+            str(k): str(v)
+            for k, v in headers
+        }
+
+    def _metadata_from_response(self, resp) -> dict:
+        headers = resp.headers
+        info = {
+            "url": resp.geturl(),
+            "status": getattr(resp, "status", None),
+            "content_type": headers.get("Content-Type"),
+            "content_length": headers.get("Content-Length"),
+            "headers": self._headers_to_dict(headers),
+        }
+        return info
+
+    def fetch_text(self, url: str):
+        log.info("fetching text url: %s", url)
+        req = self._request(url, method="GET")
+        with self._open(req) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             data = resp.read().decode(charset, errors="ignore")
             log.info("fetched %d chars from %s", len(data), resp.geturl())
@@ -49,67 +88,26 @@ class Charlie:
 
     def fetch_bytes(self, url: str) -> bytes:
         log.info("fetching binary url: %s", url)
-        ua = build_user_agent("0.3") if resolve_bool_flag("charlie_use_generated_ua", default_value=False) else "tinybrowser/0.3 (hand-rolled engine)"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": ua},
-        )
-        with self._opener.open(req) as resp:
+        req = self._request(url, method="GET")
+        with self._open(req) as resp:
             data = resp.read()
             log.info("fetched %d bytes", len(data))
             return data
 
-    #
-    # NEW FUNCTION: Fetch metadata without downloading the whole file
-    #
     def fetch_metadata(self, url: str):
         log.info("fetching metadata for url: %s", url)
-
-        if not url.startswith(("http://", "https://")):
-            url = "http://" + url
-            log.debug("normalized url to %s", url)
-
-        ua = build_user_agent("0.3") if resolve_bool_flag("charlie_use_generated_ua", default_value=False) else "tinybrowser/0.3 (hand-rolled engine)"
-        req = urllib.request.Request(
-            url,
-            method="HEAD",  # HEAD request = headers only
-            headers={"User-Agent": ua},
-        )
+        req = self._request(url, method="HEAD")
 
         try:
-            with self._opener.open(req) as resp:
-                headers = resp.headers
-
-                info = {
-                    "url": resp.geturl(),
-                    "status": getattr(resp, "status", None),
-                    "content_type": headers.get("Content-Type"),
-                    "content_length": headers.get("Content-Length"),
-                    "headers": dict(headers),
-                }
-
+            with self._open(req) as resp:
+                info = self._metadata_from_response(resp)
                 log.info("metadata fetched: %s", info)
                 return info
 
         except urllib.error.HTTPError as e:
-            # fallback: some servers reject HEAD; retry GET with no body read
             log.warning("HEAD failed (%s), retrying with GET", e)
-
-            ua = build_user_agent("0.3") if resolve_bool_flag("charlie_use_generated_ua", default_value=False) else "tinybrowser/0.3 (hand-rolled engine)"
-            req = urllib.request.Request(
-                url,
-                method="GET",
-                headers={"User-Agent": ua},
-            )
-
-            with self._opener.open(req) as resp:
-                headers = resp.headers
-                info = {
-                    "url": resp.geturl(),
-                    "status": getattr(resp, "status", None),
-                    "content_type": headers.get("Content-Type"),
-                    "content_length": headers.get("Content-Length"),
-                    "headers": dict(headers),
-                }
+            req = self._request(url, method="GET")
+            with self._open(req) as resp:
+                info = self._metadata_from_response(resp)
                 log.info("metadata (GET fallback) fetched: %s", info)
                 return info

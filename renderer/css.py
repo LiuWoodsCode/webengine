@@ -12,6 +12,7 @@ from .utils import px
 log = logging.getLogger("Vivienne.CSS")
 
 SUPPORTED_PROPERTIES = {
+    "background",
     "margin",
     "margin-top",
     "margin-bottom",
@@ -86,6 +87,7 @@ KEYWORD_PROPERTIES = {
         "table-caption",
         "flex",
         "grid",
+        "contents",
         "none",
     },
     "position": {"static", "relative", "absolute", "fixed", "sticky"},
@@ -137,7 +139,7 @@ KEYWORD_PROPERTIES = {
     },
 }
 
-PSEUDO_CLASSES = {"focus", "first-child", "last-child"}
+PSEUDO_CLASSES = {"focus", "first-child", "last-child", "hover", "root"}
 PSEUDO_ELEMENTS = {"before", "after", "selection"}
 
 VENDOR_KEYWORDS = {
@@ -165,7 +167,15 @@ class CompoundSelector:
     classes: list[str] = field(default_factory=list)
     attrs: list[AttributeSelector] = field(default_factory=list)
     pseudo_classes: list[str] = field(default_factory=list)
+    pseudo_functions: list["FunctionalPseudoClass"] = field(default_factory=list)
     pseudo_element: str | None = None
+
+
+@dataclass
+class FunctionalPseudoClass:
+    name: str
+    argument: str
+    selector: Selector | None = None
 
 
 @dataclass
@@ -485,7 +495,8 @@ def _parse_declarations_from_text(text: str) -> dict:
         prop = name.strip().lower()
         if not prop:
             continue
-        if prop not in SUPPORTED_PROPERTIES:
+        is_custom_property = prop.startswith("--")
+        if prop not in SUPPORTED_PROPERTIES and not is_custom_property:
             continue
         raw = value.strip()
         important = False
@@ -493,6 +504,9 @@ def _parse_declarations_from_text(text: str) -> dict:
             raw = raw[: -len("!important")].strip()
             important = True
         ast = _parse_value_ast(raw)
+        if is_custom_property:
+            props[prop] = (raw, important, ast)
+            continue
         if not _value_is_valid(prop, raw, ast):
             continue
         props[prop] = (raw, important, ast)
@@ -518,7 +532,7 @@ def _tokenize_selector(selector: str) -> list[tuple[str, str]]:
             tokens.append(("DOUBLE_COLON", "::"))
             i += 2
             continue
-        if ch in (":", ".", "#", ",", ">", "*", "[", "]", "="):
+        if ch in (":", ".", "#", ",", ">", "*", "[", "]", "=", "(", ")", "+"):
             tokens.append((ch, ch))
             i += 1
             continue
@@ -540,6 +554,54 @@ def _tokenize_selector(selector: str) -> list[tuple[str, str]]:
         tokens.append(("ERROR", ch))
         return tokens
     return tokens
+
+
+def _selector_token_text(token: tuple[str, str]) -> str:
+    token_type, token_value = token
+    if token_type == "STRING":
+        return f'"{token_value}"'
+    return token_value
+
+
+def _parse_function_argument(tokens: list[tuple[str, str]], i: int) -> tuple[str, int] | None:
+    if i >= len(tokens) or tokens[i][0] != "(":
+        return None
+
+    depth = 1
+    i += 1
+    arg_tokens: list[tuple[str, str]] = []
+    while i < len(tokens) and depth:
+        token = tokens[i]
+        if token[0] == "(":
+            depth += 1
+        elif token[0] == ")":
+            depth -= 1
+            if depth == 0:
+                return "".join(_selector_token_text(t) for t in arg_tokens).strip(), i + 1
+        if depth:
+            arg_tokens.append(token)
+        i += 1
+    return None
+
+
+def _parse_simple_selector(selector: str) -> Selector | None:
+    parsed = _parse_selector(selector)
+    if parsed is None or len(parsed.parts) != 1:
+        return None
+    if parsed.parts[0].combinator not in (None,):
+        return None
+    return parsed
+
+
+def _is_supported_nth_argument(argument: str) -> bool:
+    arg = (argument or "").strip().lower().replace(" ", "")
+    if not arg:
+        return False
+    if arg in {"odd", "even"}:
+        return True
+    if re.fullmatch(r"[-+]?\d+", arg):
+        return True
+    return re.fullmatch(r"[-+]?(?:\d+)?n(?:[-+]?\d+)?", arg) is not None
 
 
 def _parse_selector(selector: str) -> Selector | None:
@@ -613,12 +675,36 @@ def _parse_selector(selector: str) -> Selector | None:
                     return None
                 name = tokens[i][1].lower()
                 i += 1
+                argument = None
+                if i < len(tokens) and tokens[i][0] == "(":
+                    parsed_argument = _parse_function_argument(tokens, i)
+                    if parsed_argument is None:
+                        return None
+                    argument, i = parsed_argument
                 if is_element or name in PSEUDO_ELEMENTS:
+                    if argument is not None:
+                        return None
                     compound.pseudo_element = name
                 else:
-                    if name not in PSEUDO_CLASSES:
+                    if argument is None:
+                        if name not in PSEUDO_CLASSES:
+                            return None
+                        compound.pseudo_classes.append(name)
+                    elif name == "nth-child":
+                        if not _is_supported_nth_argument(argument):
+                            return None
+                        compound.pseudo_functions.append(
+                            FunctionalPseudoClass(name=name, argument=argument)
+                        )
+                    elif name == "not":
+                        inner = _parse_simple_selector(argument)
+                        if inner is None:
+                            return None
+                        compound.pseudo_functions.append(
+                            FunctionalPseudoClass(name=name, argument=argument, selector=inner)
+                        )
+                    else:
                         return None
-                    compound.pseudo_classes.append(name)
                 continue
             if t_type == "IDENT" and compound.tag is None and not compound.universal:
                 compound.tag = t_val
@@ -642,7 +728,8 @@ def _parse_selector(selector: str) -> Selector | None:
 def _parse_selector_list(sel_blob: str) -> list[Selector] | None:
     raw_selectors = []
     buf = ""
-    depth = 0
+    bracket_depth = 0
+    paren_depth = 0
     in_string = False
     string_char = ""
     for ch in sel_blob:
@@ -657,10 +744,14 @@ def _parse_selector_list(sel_blob: str) -> list[Selector] | None:
             buf += ch
             continue
         if ch == "[":
-            depth += 1
+            bracket_depth += 1
         elif ch == "]":
-            depth = max(0, depth - 1)
-        if ch == "," and depth == 0:
+            bracket_depth = max(0, bracket_depth - 1)
+        elif ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+        if ch == "," and bracket_depth == 0 and paren_depth == 0:
             if buf.strip():
                 raw_selectors.append(buf.strip())
             buf = ""
@@ -676,6 +767,19 @@ def _parse_selector_list(sel_blob: str) -> list[Selector] | None:
             return None
         selectors.append(parsed)
     return selectors
+
+
+def _at_rule_includes_inner_rules(at_name: str, prelude: str) -> bool:
+    prelude_lower = (prelude or "").strip().lower()
+    if at_name == "media":
+        if not prelude_lower or prelude_lower == "all":
+            return True
+        if "(" in prelude_lower:
+            return False
+        return "screen" in prelude_lower and "print" not in prelude_lower
+    if at_name in {"supports", "layer"}:
+        return True
+    return False
 
 
 def parse_css_stylesheet(css_text: str):
@@ -703,6 +807,12 @@ def parse_css_stylesheet(css_text: str):
             semi = css_text.find(";", i)
             brace = css_text.find("{", i)
             if brace != -1 and (semi == -1 or brace < semi):
+                prelude = css_text[at_name_end:brace]
+            elif semi != -1:
+                prelude = css_text[at_name_end:semi]
+            else:
+                prelude = css_text[at_name_end:]
+            if brace != -1 and (semi == -1 or brace < semi):
                 depth = 1
                 j = brace + 1
                 while j < len(css_text) and depth:
@@ -712,7 +822,7 @@ def parse_css_stylesheet(css_text: str):
                         depth -= 1
                     j += 1
 
-                if at_name == "media" and j <= len(css_text):
+                if _at_rule_includes_inner_rules(at_name, prelude) and j <= len(css_text):
                     inner_css = css_text[brace + 1 : j - 1]
                     inner_rules = parse_css_stylesheet(inner_css)
                     for inner_rule in inner_rules:
@@ -816,11 +926,70 @@ def selector_specificity(parts: list[SelectorPart] | str) -> tuple[int, int, int
         b += len(comp.classes)
         b += len(comp.attrs)
         b += len(comp.pseudo_classes)
+        for pseudo in comp.pseudo_functions:
+            if pseudo.name == "not" and pseudo.selector is not None:
+                inner = pseudo.selector.specificity
+                a += inner[0]
+                b += inner[1]
+                c += inner[2]
+            else:
+                b += 1
         if comp.tag:
             c += 1
         if comp.pseudo_element:
             c += 1
     return (a, b, c)
+
+
+def _node_element_siblings(node: DOMNode) -> list[DOMNode]:
+    parent = node.parent
+    if not parent:
+        return []
+    return [child for child in parent.children if not child.is_text()]
+
+
+def _parse_nth_expression(argument: str) -> tuple[int, int] | None:
+    arg = (argument or "").strip().lower().replace(" ", "")
+    if arg == "odd":
+        return (2, 1)
+    if arg == "even":
+        return (2, 0)
+    if re.fullmatch(r"[-+]?\d+", arg):
+        return (0, int(arg))
+
+    match = re.fullmatch(r"([+-]?(?:\d+)?)n([+-]?\d+)?", arg)
+    if not match:
+        return None
+
+    a_raw, b_raw = match.groups()
+    if a_raw in ("", "+", None):
+        a = 1
+    elif a_raw == "-":
+        a = -1
+    else:
+        a = int(a_raw)
+    b = int(b_raw or 0)
+    return (a, b)
+
+
+def _matches_nth_child(argument: str, node: DOMNode) -> bool:
+    siblings = _node_element_siblings(node)
+    if not siblings or node not in siblings:
+        return False
+
+    index = siblings.index(node) + 1
+    parsed = _parse_nth_expression(argument)
+    if parsed is None:
+        return False
+
+    a, b = parsed
+    if a == 0:
+        return index == b
+
+    delta = index - b
+    if a > 0:
+        return delta >= 0 and delta % a == 0
+    return delta <= 0 and delta % a == 0
 
 
 def _matches_compound(compound: CompoundSelector, node: DOMNode) -> bool:
@@ -859,18 +1028,28 @@ def _matches_compound(compound: CompoundSelector, node: DOMNode) -> bool:
             ):
                 return False
         elif pseudo == "first-child":
-            parent = node.parent
-            if not parent:
-                return False
-            siblings = [c for c in parent.children if not c.is_text()]
+            siblings = _node_element_siblings(node)
             if not siblings or siblings[0] is not node:
                 return False
         elif pseudo == "last-child":
-            parent = node.parent
-            if not parent:
-                return False
-            siblings = [c for c in parent.children if not c.is_text()]
+            siblings = _node_element_siblings(node)
             if not siblings or siblings[-1] is not node:
+                return False
+        elif pseudo == "hover":
+            if not (node.attrs.get("data-hover") or "hover" in node.attrs):
+                return False
+        elif pseudo == "root":
+            if not node.parent or node.parent.tag != "#document":
+                return False
+        else:
+            return False
+
+    for pseudo in compound.pseudo_functions:
+        if pseudo.name == "nth-child":
+            if not _matches_nth_child(pseudo.argument, node):
+                return False
+        elif pseudo.name == "not":
+            if pseudo.selector and selector_matches_node(pseudo.selector, node):
                 return False
         else:
             return False
@@ -979,6 +1158,133 @@ def _apply_prop(style: dict, weights: dict, prop: str, value: str, score: tuple)
     if prop not in weights or score > weights[prop]:
         weights[prop] = score
         style[prop] = value
+
+
+def _split_top_level_comma(text: str) -> tuple[str, str | None]:
+    depth = 0
+    in_string = False
+    string_char = ""
+    for i, ch in enumerate(text):
+        if in_string:
+            if ch == string_char:
+                in_string = False
+            elif ch == "\\" and i + 1 < len(text):
+                continue
+            continue
+        if ch in ("'", '"'):
+            in_string = True
+            string_char = ch
+            continue
+        if ch == "(":
+            depth += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            continue
+        if ch == "," and depth == 0:
+            return text[:i], text[i + 1 :]
+    return text, None
+
+
+def _find_matching_paren(text: str, open_index: int) -> int:
+    depth = 1
+    i = open_index + 1
+    in_string = False
+    string_char = ""
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == string_char:
+                in_string = False
+            elif ch == "\\" and i + 1 < len(text):
+                i += 1
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_string = True
+            string_char = ch
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _resolve_value_with_custom_properties(
+    value: str,
+    custom_props: dict[str, str],
+    seen: set[str] | None = None,
+) -> str | None:
+    if not isinstance(value, str) or "var(" not in value:
+        return value
+
+    seen = set(seen or ())
+    result: list[str] = []
+    i = 0
+    while i < len(value):
+        if not value.startswith("var(", i):
+            result.append(value[i])
+            i += 1
+            continue
+
+        close = _find_matching_paren(value, i + 3)
+        if close == -1:
+            return None
+
+        inner = value[i + 4 : close]
+        name_part, fallback_part = _split_top_level_comma(inner)
+        var_name = name_part.strip()
+        replacement = None
+
+        if var_name and var_name not in seen and var_name in custom_props:
+            replacement = _resolve_value_with_custom_properties(
+                custom_props[var_name],
+                custom_props,
+                seen | {var_name},
+            )
+
+        if replacement is None and fallback_part is not None:
+            replacement = _resolve_value_with_custom_properties(
+                fallback_part.strip(),
+                custom_props,
+                seen,
+            )
+
+        if replacement is None:
+            return None
+
+        result.append(replacement)
+        i = close + 1
+
+    return "".join(result)
+
+
+def _inherit_custom_properties(style: dict, parent_style: dict | None):
+    if not parent_style:
+        return
+    for prop, value in parent_style.items():
+        if prop.startswith("--") and prop not in style:
+            style[prop] = value
+
+
+def _resolve_var_functions(style: dict):
+    custom_props = {
+        prop: value for prop, value in style.items()
+        if prop.startswith("--") and isinstance(value, str)
+    }
+    for prop, value in list(style.items()):
+        if prop.startswith("--") or not isinstance(value, str) or "var(" not in value:
+            continue
+        resolved = _resolve_value_with_custom_properties(value, custom_props)
+        if resolved is None:
+            style.pop(prop, None)
+        else:
+            style[prop] = resolved
 
 
 def _resolve_special_values(style: dict, parent_style: dict | None):
@@ -1181,6 +1487,8 @@ def compute_styles(root, css_rules: list, css_enabled: bool):
             else:
                 style["display"] = "inline"
 
+        _inherit_custom_properties(style, parent_style)
+        _resolve_var_functions(style)
         _resolve_special_values(style, parent_style)
 
         if parent_style:
@@ -1195,6 +1503,7 @@ def compute_styles(root, css_rules: list, css_enabled: bool):
             if bucket["style"]:
                 pseudo_style = dict(style)
                 pseudo_style.update(bucket["style"])
+                _resolve_var_functions(pseudo_style)
                 _resolve_special_values(pseudo_style, style)
                 node.pseudo_styles[pseudo_name] = pseudo_style
 

@@ -4,6 +4,7 @@ import logging
 import json
 import re
 import platform
+import threading
 from pathlib import Path
 import ua_gen
 from PySide6.QtWidgets import (
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QTextEdit,
 )
-from PySide6.QtCore import Qt, QByteArray
+from PySide6.QtCore import Qt, QByteArray, QObject, Signal
 from PySide6.QtGui import QPixmap, QAction, QIcon
 
 from renderer import Vivienne, style_to_css, style_to_qss
@@ -82,6 +83,12 @@ def extract_title(html: str) -> str | None:
     parser = TitleParser()
     parser.feed(html)
     return parser.title
+
+
+class PageLoadBridge(QObject):
+    progress = Signal(int, str)
+    finished = Signal(int, object)
+    failed = Signal(int, object)
 
 class InternetOptionsDialog(QDialog):
     """IE-style: a separate window for settings (instead of about:config)."""
@@ -373,6 +380,12 @@ class Browser(QMainWindow, PageElementBuilder):
             resource_loader=self._fetch_resource_text,
             js_console_sink=self._append_js_console,
         )
+        self._load_generation = 0
+        self._load_threads: dict[int, threading.Thread] = {}
+        self._load_bridge = PageLoadBridge()
+        self._load_bridge.progress.connect(self._on_background_load_progress)
+        self._load_bridge.finished.connect(self._on_background_load_finished)
+        self._load_bridge.failed.connect(self._on_background_load_failed)
 
         self.statusBar().showMessage("Ready")
 
@@ -644,8 +657,112 @@ class Browser(QMainWindow, PageElementBuilder):
 
     def closeEvent(self, event):
         # persist settings on exit
+        self._load_generation += 1
         self.save_settings()
         super().closeEvent(event)
+
+    def _start_background_load(self, url: str):
+        load_id = self._load_generation
+        proxy_mode = self.settings.get("proxy_mode", "system")
+        timeout_seconds = getattr(self.engine, "_timeout_seconds", 15.0)
+
+        def worker():
+            loader = Charlie(proxy_mode=proxy_mode, timeout_seconds=timeout_seconds)
+            try:
+                self._load_bridge.progress.emit(load_id, f"Downloading metadata: {url}")
+                meta = loader.fetch_metadata(url)
+                content_type = (meta.get("content_type") or "").lower()
+                if not content_type.startswith(("text/html", "application/xhtml+xml")):
+                    self._load_bridge.finished.emit(
+                        load_id,
+                        {
+                            "kind": "non_html",
+                            "url": meta.get("url") or url,
+                            "content_type": content_type,
+                        },
+                    )
+                    return
+
+                self._load_bridge.progress.emit(load_id, f"Downloading page: {url}")
+                html, final_url = loader.fetch_text(url)
+
+                for _ in range(3):
+                    redirect_url = self._extract_html_redirect(html, final_url)
+                    if not redirect_url or redirect_url == final_url:
+                        break
+                    log.info("following html redirect: %s -> %s", final_url, redirect_url)
+                    self._load_bridge.progress.emit(
+                        load_id,
+                        f"Downloading redirect target: {redirect_url}",
+                    )
+                    html, final_url = loader.fetch_text(redirect_url)
+
+                self._load_bridge.finished.emit(
+                    load_id,
+                    {
+                        "kind": "html",
+                        "html": html,
+                        "final_url": final_url,
+                        "title": extract_title(html),
+                    },
+                )
+            except Exception as exc:
+                self._load_bridge.failed.emit(load_id, exc)
+
+        thread = threading.Thread(target=worker, name=f"crimew-load-{load_id}", daemon=True)
+        self._load_threads[load_id] = thread
+        thread.start()
+
+    def _finish_background_load(self, load_id: int):
+        self._load_threads.pop(load_id, None)
+
+    def _on_background_load_progress(self, load_id: int, message: str):
+        if load_id != self._load_generation:
+            self._finish_background_load(load_id)
+            return
+        self._set_status(message)
+
+    def _on_background_load_finished(self, load_id: int, payload: dict):
+        self._finish_background_load(load_id)
+        if load_id != self._load_generation:
+            return
+
+        kind = payload.get("kind")
+        if kind == "non_html":
+            self.current_url = payload.get("url")
+            if self.current_url:
+                self.address.setText(self.current_url)
+            log.error(
+                "This isn't HTML... content-type was: %s",
+                payload.get("content_type"),
+            )
+            self._add_text(
+                "Downloading files is current not supported.",
+                base_style={"color": "red", "font-weight": "800"},
+            )
+            self._set_status("Done", 3000)
+            return
+
+        html = payload.get("html", "")
+        final_url = payload.get("final_url")
+        title = payload.get("title")
+        self.current_url = final_url
+        if final_url:
+            self.address.setText(final_url)
+        self._set_status("Rendering page...")
+        self.renderer.render(html, base_url=final_url)
+        self._set_page_title(title, final_url)
+        self._set_status("Done", 3000)
+
+    def _on_background_load_failed(self, load_id: int, exc: Exception):
+        self._finish_background_load(load_id)
+        if load_id != self._load_generation:
+            return
+        url = self.address.text().strip()
+        log.critical("fatal error loading %s", url, exc_info=True)
+        failure = self.classify_failure(exc)
+        self.render_error_page(failure, exc)
+        self._set_status(f"Error: {exc}", 5000)
 
     def clear_page(self):
         log.debug("clearing page")
@@ -785,6 +902,7 @@ class Browser(QMainWindow, PageElementBuilder):
             return
 
         self._set_status(f"Loading: {url}")
+        self._load_generation += 1
 
         if url.startswith("about:"):
             if url == "about:":
@@ -809,47 +927,7 @@ class Browser(QMainWindow, PageElementBuilder):
             return
 
         self.clear_page()
-
-        try:
-            self._set_status(f"Downloading metadata: {url}")
-            meta = self.engine.fetch_metadata(url)
-
-            content_type = (meta.get("content_type") or "").lower()
-
-            # If it isn't HTML or XHTML, bail out early
-            # TODO: Implement file download
-            if not content_type.startswith(("text/html", "application/xhtml+xml")):
-                log.error("This isn't HTML... content-type was: %s", content_type)
-                self._add_text(f"Downloading files is current not supported.", base_style={"color": "red", "font-weight": "800"})
-                self._set_status("Done", 3000)
-                return
-
-            # At this point we know it's HTML, safe to fetch full text
-            self._set_status(f"Downloading page: {url}")
-            html, final_url = self.engine.fetch_text(url)
-
-            # Follow simple HTML-driven redirects used by JS-dependent pages
-            # (e.g. window.location.replace(...) or meta refresh fallback).
-            for _ in range(3):
-                redirect_url = self._extract_html_redirect(html, final_url)
-                if not redirect_url or redirect_url == final_url:
-                    break
-                log.info("following html redirect: %s -> %s", final_url, redirect_url)
-                self._set_status(f"Downloading redirect target: {redirect_url}")
-                html, final_url = self.engine.fetch_text(redirect_url)
-
-            self.current_url = final_url
-            self.address.setText(final_url)
-            title = extract_title(html)
-            self._set_status("Rendering page...")
-            self.renderer.render(html, base_url=final_url)
-            self._set_page_title(title, final_url)
-            self._set_status("Done", 3000)
-        except Exception as e:
-            log.critical("fatal error loading %s", url, exc_info=True)
-            failure = self.classify_failure(e)
-            self.render_error_page(failure, e)
-            self._set_status(f"Error: {e}", 5000)
+        self._start_background_load(url)
 
     def _extract_html_redirect(self, html: str, base_url: str) -> str | None:
         if not html:

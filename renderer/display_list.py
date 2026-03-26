@@ -331,6 +331,11 @@ def build_display_list(layout_root, base_url: str | None):
             builder.text(dom.text or "")
             return
 
+        if layout_node.anonymous:
+            for child in layout_node.children:
+                walk(child)
+            return
+
         tag = dom.tag
         attrs = dom.attrs
         style = dom.computed_style

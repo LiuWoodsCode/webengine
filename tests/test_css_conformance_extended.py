@@ -47,12 +47,32 @@ class CSSParserCoverageTests(unittest.TestCase):
     def test_supports_nth_child_selector(self):
         rules = parse_css_stylesheet("li:nth-child(2){color:red;}")
         self.assertEqual(len(rules), 1)
+        root = DOMNode("ul")
+        first = DOMNode("li")
+        second = DOMNode("li")
+        third = DOMNode("li")
+        root.append_child(first)
+        root.append_child(second)
+        root.append_child(third)
+        compute_styles(root, rules, True)
+        self.assertIsNone(first.computed_style.get("color"))
+        self.assertEqual(second.computed_style.get("color"), "red")
+        self.assertIsNone(third.computed_style.get("color"))
 
     
     
     def test_supports_custom_properties(self):
         rules = parse_css_stylesheet(":root{--gap:8px;} div{margin:var(--gap);}")
         self.assertTrue(any("--gap" in r["props"] for r in rules))
+        document = DOMNode("#document")
+        root = DOMNode("div")
+        child = DOMNode("div")
+        document.append_child(root)
+        root.append_child(child)
+        compute_styles(document, rules, True)
+        self.assertEqual(root.computed_style.get("--gap"), "8px")
+        self.assertEqual(child.computed_style.get("margin-left"), "8px")
+        self.assertEqual(child.computed_style.get("margin-top"), "8px")
 
     
     
@@ -153,12 +173,17 @@ class CSSCascadeCoverageTests(unittest.TestCase):
     def test_display_contents_support(self):
         rules = parse_css_stylesheet("div { display: contents; }")
         self.assertEqual(rules[0]["props"]["display"][0], "contents")
+        root = DOMNode("div")
+        compute_styles(root, rules, True)
+        self.assertEqual(root.computed_style.get("display"), "contents")
 
     
     
     def test_pseudo_class_hover(self):
         rules = parse_css_stylesheet("a:hover { color: red; }")
         self.assertEqual(len(rules), 1)
+        self.assertTrue(selector_matches("a:hover", "a", {"hover": ""}))
+        self.assertFalse(selector_matches("a:hover", "a", {}))
 
     
     
@@ -173,6 +198,8 @@ class CSSCascadeCoverageTests(unittest.TestCase):
     def test_specificity_with_not_pseudo_class(self):
         rules = parse_css_stylesheet("div:not(.x) { color: red; }")
         self.assertEqual(len(rules), 1)
+        self.assertTrue(selector_matches("div:not(.x)", "div", {"class": "y"}))
+        self.assertFalse(selector_matches("div:not(.x)", "div", {"class": "x"}))
 
     
     

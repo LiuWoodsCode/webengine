@@ -45,7 +45,7 @@ class DummyOpener:
         self.response = response
         self.last_request = None
 
-    def open(self, req):
+    def open(self, req, timeout=None):
         self.last_request = req
         method = req.get_method()
         if method == "HEAD":

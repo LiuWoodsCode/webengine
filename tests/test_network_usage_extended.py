@@ -48,7 +48,7 @@ class DummyOpener:
         self.response = response
         self.requests = []
 
-    def open(self, req):
+    def open(self, req, timeout=None):
         self.requests.append(req)
         return self.response
 
@@ -58,7 +58,7 @@ class HeadThenGetOpener:
         self.response = response
         self.requests = []
 
-    def open(self, req):
+    def open(self, req, timeout=None):
         self.requests.append(req)
         if req.get_method() == "HEAD":
             raise urllib.error.HTTPError(req.full_url, 405, "Method Not Allowed", None, None)

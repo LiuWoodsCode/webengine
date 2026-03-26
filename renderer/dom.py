@@ -17,6 +17,10 @@ class DOMNode:
         node.parent = self
         self.children.append(node)
 
+    def insert_child(self, index: int, node: "DOMNode"):
+        node.parent = self
+        self.children.insert(index, node)
+
     def is_text(self) -> bool:
         return self.tag == "#text"
 

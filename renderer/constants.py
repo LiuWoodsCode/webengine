@@ -81,7 +81,7 @@ INLINE_TAGS = {
     "textarea",
 }
 
-SKIP_TAGS = {"style", "script", "title", "head", "meta", "link", "base", "nextid"}
+SKIP_TAGS = {"style", "script", "title", "head", "meta", "link", "base", "nextid", "template"}
 
 INHERITED_PROPERTIES = {
     "color",

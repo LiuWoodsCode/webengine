@@ -126,10 +126,16 @@ class HTMLTreeBuilderCoverageTests(unittest.TestCase):
     
     def test_implied_html_head_body_elements(self):
         b = HTMLTreeBuilder()
-        for token in HTMLTokenizer().feed("hello"):
+        tokenizer = HTMLTokenizer()
+        for token in tokenizer.feed("hello"):
+            b.process(token)
+        for token in tokenizer.close():
             b.process(token)
         tags = [n.tag for n in b.document.root.children]
         self.assertIn("html", tags)
+        html = b.document.root.children[0]
+        self.assertEqual([child.tag for child in html.children], ["head", "body"])
+        self.assertEqual(html.children[1].children[0].text, "hello")
 
     
     
@@ -137,7 +143,10 @@ class HTMLTreeBuilderCoverageTests(unittest.TestCase):
         b = HTMLTreeBuilder()
         for token in HTMLTokenizer().feed("<b><i>x</b>y</i>"):
             b.process(token)
-        self.assertEqual(1, 0)
+        self.assertEqual([child.tag for child in b.document.root.children], ["b", "i"])
+        self.assertEqual(b.document.root.children[0].children[0].tag, "i")
+        self.assertEqual(b.document.root.children[0].children[0].children[0].text, "x")
+        self.assertEqual(b.document.root.children[1].children[0].text, "y")
 
     
     
@@ -145,7 +154,10 @@ class HTMLTreeBuilderCoverageTests(unittest.TestCase):
         b = HTMLTreeBuilder()
         for token in HTMLTokenizer().feed("<table>text<tr><td>x</td></tr></table>"):
             b.process(token)
-        self.assertEqual(1, 0)
+        self.assertEqual(b.document.root.children[0].tag, "#text")
+        self.assertEqual(b.document.root.children[0].text, "text")
+        self.assertEqual(b.document.root.children[1].tag, "table")
+        self.assertEqual(b.document.root.children[1].children[0].tag, "tr")
 
     
     
@@ -153,15 +165,25 @@ class HTMLTreeBuilderCoverageTests(unittest.TestCase):
         b = HTMLTreeBuilder()
         for token in HTMLTokenizer().feed("<template><div>x</div></template>"):
             b.process(token)
-        self.assertEqual(1, 0)
+        template = b.document.root.children[0]
+        self.assertEqual(template.tag, "template")
+        self.assertEqual(template.children[0].tag, "div")
+        self.assertEqual(template.children[0].children[0].text, "x")
 
     
     
     def test_noscript_tree_rules_depend_on_scripting_flag(self):
-        b = HTMLTreeBuilder()
-        for token in HTMLTokenizer().feed("<noscript><p>x</p></noscript>"):
-            b.process(token)
-        self.assertEqual(1, 0)
+        disabled = HTMLTreeBuilder(scripting_enabled=False)
+        enabled = HTMLTreeBuilder(scripting_enabled=True)
+        tokens = HTMLTokenizer().feed("<noscript><p>x</p></noscript>")
+        for token in tokens:
+            disabled.process(token)
+            enabled.process(token)
+
+        self.assertEqual(disabled.document.root.children[0].children[0].tag, "p")
+        self.assertEqual(disabled.document.root.children[0].children[0].children[0].text, "x")
+        self.assertEqual(enabled.document.root.children[0].tag, "noscript")
+        self.assertEqual(enabled.document.root.children[0].children, [])
 
 
 if __name__ == "__main__":

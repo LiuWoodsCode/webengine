@@ -57,6 +57,7 @@ def _install_pyside6_stubs():
         "QMessageBox",
         "QMenu",
         "QSizePolicy",
+        "QComboBox",
         "QTextEdit",
     ]:
         setattr(qtwidgets, name, Dummy)
@@ -65,6 +66,8 @@ def _install_pyside6_stubs():
 
     qtcore.Qt = types.SimpleNamespace(AlignTop=1, ShortcutFocusReason=2)
     qtcore.QByteArray = bytes
+    qtcore.QObject = Dummy
+    qtcore.Signal = lambda *args, **kwargs: DummySignal()
 
     for name in ["QPixmap", "QAction", "QIcon"]:
         setattr(qtgui, name, Dummy)
