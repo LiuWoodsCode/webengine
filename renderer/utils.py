@@ -1,15 +1,8 @@
 import re
-
+import html
 
 def html_unescape(s: str) -> str:
-    return (
-        s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-    )
+    return html.unescape(s)
 
 
 def normalize_ws(s: str) -> str:
