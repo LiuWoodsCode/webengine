@@ -539,8 +539,6 @@ class JSParser:
 		return TryCatchStatement(try_block=try_block, catch_name=catch_name, catch_block=catch_block)
 
 	def _expression(self) -> object:
-		if self._is_arrow_function_start():
-			return self._arrow_function_expression()
 		expr = self._assignment()
 		if not (self._peek().kind == "punct" and self._peek().value == ","):
 			return expr
@@ -577,10 +575,12 @@ class JSParser:
 		if self._peek().kind == "punct" and self._peek().value == "{":
 			body: object = self._block()
 		else:
-			body = self._expression()
+			body = self._assignment()
 		return FunctionExpression(params=params, body=body, is_arrow=True)
 
 	def _assignment(self) -> object:
+		if self._is_arrow_function_start():
+			return self._arrow_function_expression()
 		left = self._conditional()
 		if self._match("op", "="):
 			if not isinstance(left, (Identifier, MemberExpression)):

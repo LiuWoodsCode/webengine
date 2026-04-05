@@ -111,6 +111,15 @@ class ECMAParserCoverageTests(unittest.TestCase):
     def test_parse_arrow_function(self):
         parse_js("var f = (a) => a + 1;")
 
+    def test_parse_arrow_function_in_call_arguments(self):
+        parse_js("console.log(() => 1, (a) => a + 1);")
+
+    def test_parse_arrow_function_in_array_literal(self):
+        parse_js("var handlers = [() => 1, (value) => value + 1];")
+
+    def test_parse_arrow_function_in_object_literal(self):
+        parse_js("var handlers = {click: () => 1, keyup: (value) => value + 1};")
+
     
     
     def test_parse_template_literal(self):

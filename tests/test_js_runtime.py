@@ -64,6 +64,17 @@ class JSRuntimeTests(unittest.TestCase):
         result = runtime.execute("var x = 5; var f = (y) => x + y; x = 7; f(3);")
         self.assertEqual(result, 10.0)
 
+    def test_arrow_function_can_be_passed_as_call_argument(self):
+        runtime = JSRuntime()
+        runtime.global_scope.declare("invoke", lambda fn, value: fn.call(runtime, [value]), is_const=True)
+        result = runtime.execute("invoke((value) => value + 1, 2);")
+        self.assertEqual(result, 3.0)
+
+    def test_arrow_function_in_object_literal_value(self):
+        runtime = JSRuntime()
+        result = runtime.execute("var handlers = {click: () => 7}; handlers.click();")
+        self.assertEqual(result, 7)
+
 
 if __name__ == "__main__":
     unittest.main()
