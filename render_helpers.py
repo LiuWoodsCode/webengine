@@ -2,9 +2,9 @@
 
 from PySide6.QtWidgets import (
     QWidget, QLabel, QFrame, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QPushButton, QSizePolicy
+    QLineEdit, QPushButton, QSizePolicy, QLayout
 )
-from PySide6.QtCore import Qt, QByteArray
+from PySide6.QtCore import Qt, QByteArray, QRect, QSize
 from PySide6.QtGui import QPixmap, QIcon
 
 from renderer import style_to_css, style_to_qss
@@ -13,6 +13,128 @@ import urllib.parse
 import logging
 
 log = logging.getLogger("Crimew.UIBuilder")
+
+
+class FlowLayout(QLayout):
+    def __init__(self, parent: QWidget | None=None, spacing: int=0, alignment=Qt.AlignLeft):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = max(0, spacing)
+        self._alignment = alignment
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _line_offset(self, line_width: int, available_width: int) -> int:
+        if self._alignment == Qt.AlignRight:
+            return max(0, available_width - line_width)
+        if self._alignment == Qt.AlignHCenter:
+            return max(0, (available_width - line_width) // 2)
+        return 0
+
+    def _flush_line(
+        self,
+        line_items,
+        line_width: int,
+        line_height: int,
+        x: int,
+        y: int,
+        available_width: int,
+        test_only: bool,
+    ) -> int:
+        if not line_items:
+            return y
+        line_x = x + self._line_offset(line_width, available_width)
+        for item, size in line_items:
+            if not test_only:
+                item.setGeometry(QRect(line_x, y, size.width(), size.height()))
+            line_x += size.width() + self._spacing
+        return y + line_height
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        content_rect = rect.adjusted(left, top, -right, -bottom)
+        available_width = max(1, content_rect.width())
+
+        x = content_rect.x()
+        y = content_rect.y()
+        line_items = []
+        line_width = 0
+        line_height = 0
+
+        for item in self._items:
+            size = item.sizeHint()
+            next_line_width = size.width() if not line_items else line_width + self._spacing + size.width()
+            if line_items and next_line_width > available_width:
+                y = self._flush_line(
+                    line_items,
+                    line_width,
+                    line_height,
+                    x,
+                    y,
+                    available_width,
+                    test_only,
+                )
+                y += self._spacing
+                line_items = []
+                line_width = 0
+                line_height = 0
+
+            if line_items:
+                line_width += self._spacing
+            line_items.append((item, size))
+            line_width += size.width()
+            line_height = max(line_height, size.height())
+
+        y = self._flush_line(
+            line_items,
+            line_width,
+            line_height,
+            x,
+            y,
+            available_width,
+            test_only,
+        )
+        used_height = max(0, y - content_rect.y())
+        return used_height + top + bottom
 
 
 class PageElementBuilder:
@@ -115,6 +237,44 @@ class PageElementBuilder:
             return float_context['center_layout']
         return block['layout']
 
+    def _style_box_margins(self, style: dict | None, prefix: str) -> tuple[int, int, int, int]:
+        style = style or {}
+        left = parse_px_int(style.get(f'{prefix}-left')) or 0
+        top = parse_px_int(style.get(f'{prefix}-top')) or 0
+        right = parse_px_int(style.get(f'{prefix}-right')) or 0
+        bottom = parse_px_int(style.get(f'{prefix}-bottom')) or 0
+        return left, top, right, bottom
+
+    def _style_to_widget_qss(
+        self,
+        style: dict | None,
+        *,
+        include_margin: bool = True,
+        include_padding: bool = True,
+    ) -> str:
+        if not style:
+            return ''
+        filtered = {}
+        for key, value in style.items():
+            if not include_margin and key.startswith('margin'):
+                continue
+            if not include_padding and key.startswith('padding'):
+                continue
+            filtered[key] = value
+        return style_to_qss(filtered)
+
+    def _wrap_widget_for_margins(self, widget: QWidget, css: dict | None=None) -> QWidget:
+        margins = self._style_box_margins(css, 'margin')
+        if not any(margins):
+            return widget
+        wrapper = QWidget()
+        wrapper.setSizePolicy(widget.sizePolicy())
+        layout = QVBoxLayout(wrapper)
+        layout.setSpacing(0)
+        layout.setContentsMargins(*margins)
+        layout.addWidget(widget)
+        return wrapper
+
     def _clear_float_context(self):
         block = self._current_block()
         block['float_context'] = None
@@ -162,23 +322,20 @@ class PageElementBuilder:
             block['line_widget'] = None
             block['line_layout'] = None
 
-    def _ensure_inline_line(self) -> QHBoxLayout:
+    def _ensure_inline_line(self):
         block = self._current_block()
         line_layout = block.get('line_layout')
         if line_layout is not None:
             return line_layout
         line_widget = QWidget()
         line_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        line_layout = QHBoxLayout(line_widget)
-        line_layout.setContentsMargins(0, 0, 0, 0)
-        line_layout.setSpacing(0)
         text_align = str((block.get('css') or {}).get('text-align', '')).strip().lower()
+        flow_alignment = Qt.AlignLeft
         if text_align == 'right':
-            line_layout.setAlignment(Qt.AlignRight)
+            flow_alignment = Qt.AlignRight
         elif text_align == 'center':
-            line_layout.setAlignment(Qt.AlignHCenter)
-        else:
-            line_layout.setAlignment(Qt.AlignLeft)
+            flow_alignment = Qt.AlignHCenter
+        line_layout = FlowLayout(line_widget, spacing=0, alignment=flow_alignment)
         self._current_content_layout().addWidget(line_widget)
         block['line_widget'] = line_widget
         block['line_layout'] = line_layout
@@ -186,6 +343,7 @@ class PageElementBuilder:
 
     def _add_widget(self, widget: QWidget, inline: bool, css: dict | None=None):
         style = dict(css or {})
+        widget = self._wrap_widget_for_margins(widget, style)
         float_value = str(style.get('float', '')).strip().lower()
         clear_value = str(style.get('clear', '')).strip().lower()
         clear_requested = clear_value in {'left', 'right', 'both', 'all', 'inline-start', 'inline-end'}
@@ -201,7 +359,7 @@ class PageElementBuilder:
                 float_context['left_layout'].addWidget(widget)
             return
         if inline:
-            self._ensure_inline_line().addWidget(widget, 0, Qt.AlignLeft | Qt.AlignTop)
+            self._ensure_inline_line().addWidget(widget)
         else:
             self._end_inline_line()
             block = self._current_block()
@@ -226,7 +384,6 @@ class PageElementBuilder:
             self._end_inline_line()
         container = QFrame()
         container.setFrameShape(QFrame.NoFrame)
-        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         css = dict(css or {})
         display = str(css.get('display', '')).strip().lower()
         flex_dir = str(css.get('flex-direction', 'row')).strip().lower()
@@ -234,9 +391,15 @@ class PageElementBuilder:
             layout = QVBoxLayout(container)
         elif display in ('flex', 'inline-flex'):
             layout = QHBoxLayout(container)
+        elif display == 'table-row':
+            layout = QHBoxLayout(container)
         else:
             layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        if display in ('inline-block', 'table-cell', 'table-caption'):
+            container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        else:
+            container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        layout.setContentsMargins(*self._style_box_margins(css, 'padding'))
         layout.setAlignment(Qt.AlignTop)
         layout.setSpacing(0)
         if display in ('flex', 'inline-flex'):
@@ -255,8 +418,11 @@ class PageElementBuilder:
             container.setFixedWidth(max(1, css_width))
         if css_height:
             container.setFixedHeight(max(1, css_height))
-        if qss:
-            container.setStyleSheet(qss)
+        container_qss = self._style_to_widget_qss(css, include_margin=False, include_padding=False)
+        if qss and not container_qss:
+            container_qss = qss
+        if container_qss:
+            container.setStyleSheet(container_qss)
         if css:
             container.setProperty('css', css)
             css_text = style_to_css(css)
@@ -329,7 +495,7 @@ class PageElementBuilder:
         white_space = str(style.get('white-space', '')).strip().lower()
         lbl.setWordWrap(white_space in {'pre-wrap', 'break-spaces'})
         lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        qss = style_to_qss(style)
+        qss = self._style_to_widget_qss(style, include_margin=False)
         css_text = style_to_css(style)
         if qss_extra:
             qss = (qss + ' ' + qss_extra).strip()
@@ -359,8 +525,11 @@ class PageElementBuilder:
         lbl.linkActivated.connect(lambda u=href: self.open_link(u))
         lbl.setWordWrap(False)
         lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        if qss:
-            lbl.setStyleSheet(qss)
+        link_qss = self._style_to_widget_qss(css, include_margin=False)
+        if qss and not link_qss:
+            link_qss = qss
+        if link_qss:
+            lbl.setStyleSheet(link_qss)
         if css:
             lbl.setProperty('css', css)
             css_text = style_to_css(css)
@@ -399,8 +568,11 @@ class PageElementBuilder:
             lbl.setPixmap(pix)
             if alt:
                 lbl.setToolTip(alt)
-            if qss:
-                lbl.setStyleSheet(qss)
+            image_qss = self._style_to_widget_qss(css, include_margin=False)
+            if qss and not image_qss:
+                image_qss = qss
+            if image_qss:
+                lbl.setStyleSheet(image_qss)
             if css:
                 lbl.setProperty('css', css)
                 css_text = style_to_css(css)
@@ -436,8 +608,11 @@ class PageElementBuilder:
             inp.setFixedWidth(220)
         if css_height:
             inp.setFixedHeight(max(18, css_height))
-        if qss:
-            inp.setStyleSheet(qss)
+        input_qss = self._style_to_widget_qss(css, include_margin=False)
+        if qss and not input_qss:
+            input_qss = qss
+        if input_qss:
+            inp.setStyleSheet(input_qss)
         if css:
             inp.setProperty('css', css)
             css_text = style_to_css(css)
@@ -460,8 +635,11 @@ class PageElementBuilder:
             btn.setFixedWidth(max(30, css_width))
         if css_height:
             btn.setFixedHeight(max(18, css_height))
-        if qss:
-            btn.setStyleSheet(qss)
+        button_qss = self._style_to_widget_qss(css, include_margin=False)
+        if qss and not button_qss:
+            button_qss = qss
+        if button_qss:
+            btn.setStyleSheet(button_qss)
         if css:
             btn.setProperty('css', css)
             css_text = style_to_css(css)
@@ -513,8 +691,11 @@ class PageElementBuilder:
             btn.setFixedWidth(max(1, css_width))
         elif css_height:
             btn.setFixedHeight(max(1, css_height))
-        if qss:
-            btn.setStyleSheet(qss)
+        image_button_qss = self._style_to_widget_qss(css, include_margin=False)
+        if qss and not image_button_qss:
+            image_button_qss = qss
+        if image_button_qss:
+            btn.setStyleSheet(image_button_qss)
         if css:
             btn.setProperty('css', css)
             css_text = style_to_css(css)

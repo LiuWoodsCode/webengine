@@ -1114,9 +1114,9 @@ def default_tag_style(tag: str) -> dict:
     if tag == "tfoot":
         return {"display": "table-footer-group"}
     if tag == "tr":
-        return {"display": "block"}
+        return {"display": "table-row"}
     if tag in ("td", "th"):
-        return {"display": "inline-block"}
+        return {"display": "table-cell"}
     if tag == "h1":
         return {"font-size": "26px", "font-weight": "800"}
     if tag == "h2":

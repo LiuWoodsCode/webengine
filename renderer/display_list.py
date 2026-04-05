@@ -358,7 +358,7 @@ def build_display_list(layout_root, base_url: str | None):
                 "table-caption",
             }
         )
-        inline_container = display in {"inline-block", "inline-flex", "table-cell", "table-caption"}
+        inline_container = display in {"inline-block", "inline-flex", "table-caption"}
 
         if tag in ("br", "hr", "img", "input"):
             builder.self_element(tag, attrs, style)

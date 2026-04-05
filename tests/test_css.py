@@ -2,6 +2,7 @@ import unittest
 
 from renderer.css import (
     compute_styles,
+    default_tag_style,
     parse_css_stylesheet,
     parse_inline_style,
     style_to_css,
@@ -43,6 +44,11 @@ class CSSTests(unittest.TestCase):
         props = parse_inline_style("float: left; clear: both;")
         self.assertEqual(props["float"][0], "left")
         self.assertEqual(props["clear"][0], "both")
+
+    def test_table_defaults_use_table_displays(self):
+        self.assertEqual(default_tag_style("tr").get("display"), "table-row")
+        self.assertEqual(default_tag_style("td").get("display"), "table-cell")
+        self.assertEqual(default_tag_style("th").get("display"), "table-cell")
 
 
 if __name__ == "__main__":

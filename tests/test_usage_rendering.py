@@ -78,6 +78,19 @@ class RenderingUsageTests(unittest.TestCase):
         self.assertEqual(image_btns[0][5], 24)
         self.assertEqual(image_btns[0][6], 16)
 
+    def test_table_rows_and_cells_render_as_block_containers(self):
+        sink = RecordingSink()
+        renderer = Vivienne(sink=sink, settings={"css_enabled": True, "js_enabled": False})
+
+        html = "<table><tr><td>Alpha</td><td>Beta</td></tr></table>"
+        renderer.render(html, base_url="http://example.com/")
+
+        table_rows = [c for c in sink.calls if c[0] == "block_start" and c[1] == "tr"]
+        table_cells = [c for c in sink.calls if c[0] == "block_start" and c[1] == "td"]
+        self.assertEqual(len(table_rows), 1)
+        self.assertEqual(len(table_cells), 2)
+        self.assertTrue(all(not call[2] for call in table_cells))
+
 
 if __name__ == "__main__":
     unittest.main()
