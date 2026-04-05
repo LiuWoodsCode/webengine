@@ -78,13 +78,18 @@ class Charlie:
         return info
 
     def fetch_text(self, url: str):
+        data, info = self.fetch_text_with_metadata(url)
+        return data, info.get("url") or self._normalize_url(url)
+
+    def fetch_text_with_metadata(self, url: str):
         log.info("fetching text url: %s", url)
         req = self._request(url, method="GET")
         with self._open(req) as resp:
+            info = self._metadata_from_response(resp)
             charset = resp.headers.get_content_charset() or "utf-8"
             data = resp.read().decode(charset, errors="ignore")
-            log.info("fetched %d chars from %s", len(data), resp.geturl())
-            return data, resp.geturl()
+            log.info("fetched %d chars from %s", len(data), info.get("url"))
+            return data, info
 
     def fetch_bytes(self, url: str) -> bytes:
         log.info("fetching binary url: %s", url)

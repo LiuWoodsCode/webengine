@@ -93,6 +93,20 @@ class NetworkUsageExtendedTests(unittest.TestCase):
             data = engine.fetch_bytes("http://example.com/a.bin")
         self.assertEqual(data, b"\x00\x01\x02")
 
+    def test_fetch_text_with_metadata_uses_single_get(self):
+        headers = DummyHeaders(values={"Content-Type": "text/html", "Content-Length": "5"})
+        resp = DummyResponse(data=b"hello", headers=headers)
+        opener = DummyOpener(resp)
+        with mock.patch.object(Charlie, "_build_opener", return_value=opener):
+            engine = Charlie(proxy_mode="none")
+            text, info = engine.fetch_text_with_metadata("example.com")
+
+        self.assertEqual(text, "hello")
+        self.assertEqual(info["content_type"], "text/html")
+        self.assertEqual(info["content_length"], "5")
+        self.assertEqual(len(opener.requests), 1)
+        self.assertEqual(opener.requests[0].get_method(), "GET")
+
     def test_fetch_metadata_head_then_get_fallback(self):
         headers = DummyHeaders(values={"Content-Type": "text/plain", "Content-Length": "3"})
         resp = DummyResponse(data=b"abc", headers=headers)

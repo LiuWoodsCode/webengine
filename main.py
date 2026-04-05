@@ -669,8 +669,8 @@ class Browser(QMainWindow, PageElementBuilder):
         def worker():
             loader = Charlie(proxy_mode=proxy_mode, timeout_seconds=timeout_seconds)
             try:
-                self._load_bridge.progress.emit(load_id, f"Downloading metadata: {url}")
-                meta = loader.fetch_metadata(url)
+                self._load_bridge.progress.emit(load_id, f"Downloading page: {url}")
+                html, meta = loader.fetch_text_with_metadata(url)
                 content_type = (meta.get("content_type") or "").lower()
                 if not content_type.startswith(("text/html", "application/xhtml+xml")):
                     self._load_bridge.finished.emit(
@@ -682,9 +682,7 @@ class Browser(QMainWindow, PageElementBuilder):
                         },
                     )
                     return
-
-                self._load_bridge.progress.emit(load_id, f"Downloading page: {url}")
-                html, final_url = loader.fetch_text(url)
+                final_url = meta.get("url") or url
 
                 for _ in range(3):
                     redirect_url = self._extract_html_redirect(html, final_url)
@@ -695,7 +693,8 @@ class Browser(QMainWindow, PageElementBuilder):
                         load_id,
                         f"Downloading redirect target: {redirect_url}",
                     )
-                    html, final_url = loader.fetch_text(redirect_url)
+                    html, redirect_meta = loader.fetch_text_with_metadata(redirect_url)
+                    final_url = redirect_meta.get("url") or redirect_url
 
                 self._load_bridge.finished.emit(
                     load_id,

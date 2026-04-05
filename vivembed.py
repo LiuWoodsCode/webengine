@@ -106,13 +106,13 @@ class CrimewView(QWidget, PageElementBuilder):
         self.urlChanged.emit(url)
 
         try:
-            meta = self.engine.fetch_metadata(url)
+            html, meta = self.engine.fetch_text_with_metadata(url)
             ct = (meta.get("content_type") or "").lower()
 
             if not ct.startswith(("text/html", "application/xhtml+xml")):
                 raise RuntimeError(f"Unsupported content type: {ct}")
 
-            html, final_url = self.engine.fetch_text(url)
+            final_url = meta.get("url") or url
             self._render_html(html, final_url)
             self.loadFinished.emit(final_url, True)
 
@@ -329,8 +329,8 @@ class CrimewView(QWidget, PageElementBuilder):
         self.clear_page()
 
         try:
-            self._set_status(f"Downloading metadata: {url}")
-            meta = self.engine.fetch_metadata(url)
+            self._set_status(f"Downloading page: {url}")
+            html, meta = self.engine.fetch_text_with_metadata(url)
 
             content_type = (meta.get("content_type") or "").lower()
 
@@ -342,9 +342,7 @@ class CrimewView(QWidget, PageElementBuilder):
                 self._set_status("Done", 3000)
                 return
 
-            # At this point we know it's HTML, safe to fetch full text
-            self._set_status(f"Downloading page: {url}")
-            html, final_url = self.engine.fetch_text(url)
+            final_url = meta.get("url") or url
 
             # Follow simple HTML-driven redirects used by JS-dependent pages
             # (e.g. window.location.replace(...) or meta refresh fallback).
@@ -354,7 +352,8 @@ class CrimewView(QWidget, PageElementBuilder):
                     break
                 log.info("following html redirect: %s -> %s", final_url, redirect_url)
                 self._set_status(f"Downloading redirect target: {redirect_url}")
-                html, final_url = self.engine.fetch_text(redirect_url)
+                html, redirect_meta = self.engine.fetch_text_with_metadata(redirect_url)
+                final_url = redirect_meta.get("url") or redirect_url
 
             self.current_url = final_url
             self.address.setText(final_url)
