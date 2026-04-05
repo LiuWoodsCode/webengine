@@ -100,6 +100,8 @@ TWO_CHAR_OPS = {
 	"!=",
 	"<=",
 	">=",
+	"++",
+	"--",
 	"&&",
 	"||",
 	"=>",
@@ -411,6 +413,14 @@ class ObjectLiteral:
 class UnaryExpression:
 	op: str
 	argument: object
+	pos: int = 0
+
+
+@dataclass
+class UpdateExpression:
+	op: str
+	argument: object
+	prefix: bool
 	pos: int = 0
 
 
@@ -817,13 +827,34 @@ class JSParser:
 		return expr
 
 	def _unary(self) -> object:
+		if self._match("op", "++"):
+			argument = self._call_member()
+			return self._make_update_expression("++", argument, prefix=True)
+		if self._match("op", "--"):
+			argument = self._call_member()
+			return self._make_update_expression("--", argument, prefix=True)
 		if self._match("op", "!"):
 			return UnaryExpression(op="!", argument=self._unary(), pos=self._peek(-1).pos)
 		if self._match("op", "-"):
 			return UnaryExpression(op="-", argument=self._unary(), pos=self._peek(-1).pos)
 		if self._match("op", "+"):
 			return UnaryExpression(op="+", argument=self._unary(), pos=self._peek(-1).pos)
-		return self._call_member()
+		expr = self._call_member()
+		if self._match("op", "++"):
+			return self._make_update_expression("++", expr, prefix=False)
+		if self._match("op", "--"):
+			return self._make_update_expression("--", expr, prefix=False)
+		return expr
+
+	def _make_update_expression(self, op: str, argument: object, *, prefix: bool) -> UpdateExpression:
+		if not isinstance(argument, (Identifier, MemberExpression)) or getattr(argument, "optional", False):
+			raise JSParseError(
+				"Invalid update target",
+				pos=getattr(argument, "pos", self._peek().pos),
+				source_name=self.source_name,
+				source_text=self.source,
+			)
+		return UpdateExpression(op=op, argument=argument, prefix=prefix, pos=getattr(argument, "pos", 0))
 
 	def _call_member(self) -> object:
 		expr = self._primary()

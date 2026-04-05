@@ -83,10 +83,13 @@ class Vivienne:
 
         title_state = {"value": normalize_ws(html_unescape(meta.title))}
         location_state = {"href": base_url or ""}
+        element_text_state: dict[str, str] = {}
 
         document_bridge = DocumentBridge(
             get_title=lambda: title_state["value"],
             set_title=lambda new_title: title_state.__setitem__("value", normalize_ws(str(new_title))),
+            get_element_text=lambda element_id: element_text_state.get(element_id, ""),
+            set_element_text=lambda element_id, value: element_text_state.__setitem__(element_id, str(value)),
         )
         location_bridge = LocationBridge(
             get_href=lambda: location_state["href"],
@@ -101,6 +104,45 @@ class Vivienne:
                 console_logger=self._emit_js_console,
             )
         )
+
+        timer_ids = {"value": 0}
+
+        def _invoke_callback(callback):
+            if callback is None:
+                return None
+            if hasattr(callback, "call") and callable(getattr(callback, "call")):
+                return callback.call(runtime, [])
+            if callable(callback):
+                return callback()
+            return None
+
+        def _set_interval(callback, _delay=None):
+            timer_ids["value"] += 1
+            # No event loop yet. Validate callback shape and return a timer id.
+            _ = callback
+            _ = _delay
+            return timer_ids["value"]
+
+        def _clear_interval(_timer_id):
+            return None
+
+        def _set_timeout(callback, _delay=None):
+            timer_ids["value"] += 1
+            _invoke_callback(callback)
+            return timer_ids["value"]
+
+        runtime.global_scope.declare("setInterval", _set_interval, is_const=True)
+        runtime.global_scope.declare("clearInterval", _clear_interval, is_const=True)
+        runtime.global_scope.declare("setTimeout", _set_timeout, is_const=True)
+
+        try:
+            window_obj = runtime.global_scope.get("window")
+            if hasattr(window_obj, "set"):
+                window_obj.set("setInterval", _set_interval)
+                window_obj.set("clearInterval", _clear_interval)
+                window_obj.set("setTimeout", _set_timeout)
+        except Exception:
+            log.warning("failed to register window timer globals", exc_info=True)
 
         script_sources: list[tuple[str, str]] = []
         inline_source_name = base_url or "<inline-script>"

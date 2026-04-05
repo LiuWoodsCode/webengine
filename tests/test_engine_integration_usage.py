@@ -133,6 +133,36 @@ class EngineIntegrationUsageTests(unittest.TestCase):
         self.assertIn("<parse> http://example.com/assets/app.js:2", console_lines[0])
         self.assertIn("Source context:", console_lines[0])
 
+    def test_dom_event_listener_and_interval_script_does_not_throw(self):
+        sink = RecordingSink()
+        console_lines = []
+
+        html = (
+            "<button id='eventBtn'>Event</button>"
+            "<div id='eventOutput'></div>"
+            "<div id='timerOutput'></div>"
+            "<script>"
+            "var counter = 0;"
+            "document.getElementById('eventBtn').addEventListener('click', () => {"
+            "document.getElementById('eventOutput').textContent = 'Button clicked!';"
+            "});"
+            "setInterval(() => {"
+            "counter++;"
+            "document.getElementById('timerOutput').textContent = 'Counter: ' + counter;"
+            "}, 1000);"
+            "</script>"
+        )
+
+        renderer = Vivienne(
+            sink=sink,
+            settings={"css_enabled": True, "js_enabled": True},
+            js_console_sink=console_lines.append,
+        )
+
+        renderer.render(html, base_url="http://example.com/inspection/javascript.html")
+
+        self.assertFalse(any("Uncaught" in line for line in console_lines))
+
     def test_external_stylesheet_loaded_when_css_enabled(self):
         sink = RecordingSink()
 

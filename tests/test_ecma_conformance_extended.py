@@ -40,9 +40,9 @@ class ECMATokenizerCoverageTests(unittest.TestCase):
         self.assertIn("}", punct_values)
 
     def test_two_char_operators_tokenized(self):
-        tokens = tokenize_js("a==b; a!=b; a<=b; a>=b; a&&b; a||b;")
+        tokens = tokenize_js("a==b; a!=b; a<=b; a>=b; a&&b; a||b; a++; --b;")
         ops = [t.value for t in tokens if t.kind == "op"]
-        for op in ("==", "!=", "<=", ">=", "&&", "||"):
+        for op in ("==", "!=", "<=", ">=", "&&", "||", "++", "--"):
             self.assertIn(op, ops)
 
     def test_unterminated_string_raises(self):
@@ -75,6 +75,9 @@ class ECMAParserCoverageTests(unittest.TestCase):
     def test_parse_unary_expression(self):
         program = parse_js("var x = -1; !x;")
         self.assertEqual(len(program.body), 2)
+
+    def test_parse_update_expressions(self):
+        parse_js("var counter = 0; counter++; ++counter; --counter;")
 
     
     
@@ -257,6 +260,21 @@ class ECMARuntimeCoverageTests(unittest.TestCase):
     def test_while_loop_runtime(self):
         rt = JSRuntime()
         self.assertEqual(rt.execute("var i=0; while(i<3){ i=i+1; } i;"), 3)
+
+    def test_postfix_increment_returns_previous_value(self):
+        rt = JSRuntime()
+        self.assertEqual(rt.execute("var i=1; var x=i++; x;"), 1)
+        self.assertEqual(rt.execute("i;"), 2.0)
+
+    def test_prefix_increment_returns_updated_value(self):
+        rt = JSRuntime()
+        self.assertEqual(rt.execute("var i=1; var x=++i; x;"), 2.0)
+        self.assertEqual(rt.execute("i;"), 2.0)
+
+    def test_member_increment_updates_property(self):
+        rt = JSRuntime({"obj": {"count": 3}})
+        self.assertEqual(rt.execute("obj.count++;"), 3)
+        self.assertEqual(rt.execute("obj.count;"), 4.0)
 
     
     

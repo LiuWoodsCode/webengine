@@ -10,6 +10,11 @@ from .runtime import JSObject, NativeFunction
 class DocumentBridge:
 	get_title: Callable[[], str]
 	set_title: Callable[[str], None]
+	get_element_text: Callable[[str], str] | None = None
+	set_element_text: Callable[[str, str], None] | None = None
+
+	def __post_init__(self):
+		self._elements: dict[str, ElementBridge] = {}
 
 	@property
 	def title(self) -> str:
@@ -18,6 +23,37 @@ class DocumentBridge:
 	@title.setter
 	def title(self, value: Any):
 		self.set_title(str(value))
+
+	def getElementById(self, element_id: Any):
+		eid = str(element_id)
+		element = self._elements.get(eid)
+		if element is None:
+			element = ElementBridge(
+				element_id=eid,
+				get_text=(lambda: self.get_element_text(eid) if self.get_element_text else ""),
+				set_text=(lambda value: self.set_element_text(eid, value) if self.set_element_text else None),
+			)
+			self._elements[eid] = element
+		return element
+
+
+@dataclass
+class ElementBridge:
+	element_id: str
+	get_text: Callable[[], str]
+	set_text: Callable[[str], None]
+
+	@property
+	def textContent(self) -> str:
+		return self.get_text()
+
+	@textContent.setter
+	def textContent(self, value: Any):
+		self.set_text(str(value))
+
+	def addEventListener(self, _event_name: Any, _listener: Any):
+		# Static rendering has no event loop yet, so listener registration is a no-op.
+		return None
 
 
 @dataclass

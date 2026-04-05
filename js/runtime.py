@@ -25,6 +25,7 @@ from .parser import (
     ThrowStatement,
     TryCatchStatement,
     UnaryExpression,
+    UpdateExpression,
     VarDeclaration,
     WhileStatement,
     JSParseError,
@@ -586,6 +587,21 @@ class _JITCompiler:
         if isinstance(expr, UnaryExpression):
             return f"__rt._unary({expr.op!r}, {self._compile_expression(expr.argument, scope_name)})"
 
+        if isinstance(expr, UpdateExpression):
+            delta = 1 if expr.op == "++" else -1
+            if isinstance(expr.argument, Identifier):
+                return (
+                    f"__rt._update_name({scope_name}, {expr.argument.name!r}, "
+                    f"{delta}, prefix={expr.prefix!r})"
+                )
+            if isinstance(expr.argument, MemberExpression):
+                return (
+                    f"__rt._update_member({self._compile_expression(expr.argument.obj, scope_name)}, "
+                    f"{self._compile_expression(expr.argument.prop, scope_name)}, "
+                    f"{delta}, prefix={expr.prefix!r})"
+                )
+            raise JSError("Invalid update target")
+
         if isinstance(expr, BinaryExpression):
             if expr.op == "||":
                 return (
@@ -795,6 +811,18 @@ class JSRuntime:
         _set_property(obj, prop, value)
         return value
 
+    def _update_name(self, scope: Scope, name: str, delta: int, *, prefix: bool) -> Any:
+        current = scope.get(name)
+        next_value = _to_number(current) + delta
+        scope.assign(name, next_value)
+        return next_value if prefix else current
+
+    def _update_member(self, obj: Any, prop: Any, delta: int, *, prefix: bool) -> Any:
+        current = _get_property(obj, prop)
+        next_value = _to_number(current) + delta
+        _set_property(obj, prop, next_value)
+        return next_value if prefix else current
+
     def _call(self, callee: Any, args: list[Any], *, optional: bool = False) -> Any:
         if optional and callee is None:
             return None
@@ -927,6 +955,16 @@ class JSRuntime:
             if isinstance(expr, UnaryExpression):
                 arg = self._eval_expression(expr.argument, scope)
                 return _apply_unary(expr.op, arg)
+
+            if isinstance(expr, UpdateExpression):
+                delta = 1 if expr.op == "++" else -1
+                if isinstance(expr.argument, Identifier):
+                    return self._update_name(scope, expr.argument.name, delta, prefix=expr.prefix)
+                if isinstance(expr.argument, MemberExpression):
+                    obj = self._eval_expression(expr.argument.obj, scope)
+                    prop_value = self._eval_expression(expr.argument.prop, scope)
+                    return self._update_member(obj, prop_value, delta, prefix=expr.prefix)
+                raise JSError("Invalid update target")
 
             if isinstance(expr, BinaryExpression):
                 if expr.op == "||":
