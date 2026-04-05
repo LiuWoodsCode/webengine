@@ -27,12 +27,58 @@ from .parser import (
     UnaryExpression,
     VarDeclaration,
     WhileStatement,
+    JSParseError,
     parse_js,
 )
 
 
 class JSError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        source_name: str | None = None,
+        source_text: str | None = None,
+        pos: int | None = None,
+        stack: list["JSStackFrame"] | None = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.source_name = source_name
+        self.source_text = source_text
+        self.pos = pos
+        self.stack = stack or []
+
+    def __str__(self) -> str:
+        return self.message
+
+    def format_for_console(self) -> str:
+        lines = [f"Uncaught {self.message}"]
+        for frame in self.stack:
+            location = f"{frame.source_name}:{frame.line}"
+            if frame.column is not None:
+                location = f"{location}:{frame.column}"
+            lines.append(f"    {frame.function_name} {location}")
+        excerpt = _format_source_excerpt(self.source_text, self.pos)
+        if excerpt:
+            lines.extend(["", excerpt])
+        return "\n".join(lines)
+
+
+@dataclass
+class JSStackFrame:
+    function_name: str
+    source_name: str
+    line: int
+    column: int | None = None
+
+
+@dataclass
+class _ExecutionFrame:
+    function_name: str
+    source_name: str
+    source_text: str
+    node_stack: list[object] = field(default_factory=list)
 
 
 class JSReturn(Exception):
@@ -109,11 +155,18 @@ class JSFunction:
     is_arrow: bool = False
     impl: Callable[["JSRuntime", Scope], Any] | None = None
     name: str = "<anonymous>"
+    source_name: str | None = None
+    source_text: str | None = None
 
     def call(self, runtime: "JSRuntime", args: list[Any]) -> Any:
         call_scope = Scope(parent=self.closure)
         for i, param in enumerate(self.params):
             call_scope.declare(param, args[i] if i < len(args) else None)
+        runtime._push_frame(
+            self.name or "<anonymous>",
+            self.source_name or runtime._current_source_name or "<anonymous>",
+            self.source_text or runtime._current_source_text or "",
+        )
         try:
             if self.impl is not None:
                 return self.impl(runtime, call_scope)
@@ -122,6 +175,8 @@ class JSFunction:
             return runtime._eval_expression(self.body, call_scope)
         except JSReturn as ret:
             return ret.value
+        finally:
+            runtime._pop_frame()
 
 
 @dataclass
@@ -133,6 +188,48 @@ class CompiledProgram:
 
 def _truthy(value: Any) -> bool:
     return bool(value)
+
+
+def _js_value_to_error_text(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _line_col_from_pos(source: str | None, pos: int | None) -> tuple[int, int | None]:
+    if source is None or pos is None:
+        return 1, None
+    bounded = max(0, min(pos, len(source)))
+    line = source.count("\n", 0, bounded) + 1
+    last_newline = source.rfind("\n", 0, bounded)
+    column = bounded + 1 if last_newline == -1 else bounded - last_newline
+    return line, column
+
+
+def _format_source_excerpt(source: str | None, pos: int | None, *, context_lines: int = 1) -> str:
+    if source is None or pos is None:
+        return ""
+
+    lines = source.splitlines()
+    if not lines:
+        lines = [source]
+
+    line_no, column = _line_col_from_pos(source, pos)
+    start = max(1, line_no - context_lines)
+    end = min(len(lines), line_no + context_lines)
+    gutter_width = len(str(end))
+    excerpt: list[str] = ["Source context:"]
+
+    for current_line in range(start, end + 1):
+        marker = ">" if current_line == line_no else " "
+        excerpt.append(f"{marker} {current_line:>{gutter_width}} | {lines[current_line - 1]}")
+        if current_line == line_no and column is not None:
+            caret_pad = max(column - 1, 0)
+            excerpt.append(f"  {' ' * gutter_width} | {' ' * caret_pad}^")
+
+    return "\n".join(excerpt)
 
 
 def _to_number(value: Any) -> float:
@@ -549,6 +646,9 @@ class JSRuntime:
     def __init__(self, globals_dict: dict[str, Any] | None = None):
         self.global_scope = Scope(parent=None)
         self._compile_cache: dict[str, CompiledProgram] = {}
+        self._execution_frames: list[_ExecutionFrame] = []
+        self._current_source_name: str | None = None
+        self._current_source_text: str | None = None
         if globals_dict:
             for name, value in globals_dict.items():
                 self.global_scope.declare(name, value, is_const=True)
@@ -567,13 +667,91 @@ class JSRuntime:
     def transpile(self, source: str) -> str:
         return self.compile(source).python_source
 
-    def execute(self, source: str) -> Any:
+    def execute(self, source: str, source_name: str | None = None) -> Any:
+        if source_name is not None:
+            return self._execute_with_diagnostics(parse_js(source, source_name=source_name), source, source_name)
         compiled = self.compile(source)
         return compiled.entrypoint(self, self.global_scope)
 
     def eval_program(self, program: Program) -> Any:
         compiled = self.compile_program(program)
         return compiled.entrypoint(self, self.global_scope)
+
+    def _execute_with_diagnostics(self, program: Program, source: str, source_name: str) -> Any:
+        previous_source_name = self._current_source_name
+        previous_source_text = self._current_source_text
+        self._current_source_name = source_name
+        self._current_source_text = source
+        self._push_frame("<global>", source_name, source)
+        try:
+            result = None
+            for stmt in program.body:
+                result = self._eval_statement(stmt, self.global_scope)
+            return result
+        except JSThrow as exc:
+            js_error = JSError(_js_value_to_error_text(exc.value))
+            self._annotate_error(js_error)
+            raise js_error from None
+        except JSError as exc:
+            self._annotate_error(exc)
+            raise
+        finally:
+            self._pop_frame()
+            self._current_source_name = previous_source_name
+            self._current_source_text = previous_source_text
+
+    def _push_frame(self, function_name: str, source_name: str, source_text: str):
+        self._execution_frames.append(
+            _ExecutionFrame(function_name=function_name, source_name=source_name, source_text=source_text)
+        )
+
+    def _pop_frame(self):
+        if self._execution_frames:
+            self._execution_frames.pop()
+
+    def _annotate_error(self, exc: JSError):
+        if not self._execution_frames:
+            return
+
+        current_frame = self._execution_frames[-1]
+        current_node = current_frame.node_stack[-1] if current_frame.node_stack else None
+        if exc.source_name is None:
+            exc.source_name = current_frame.source_name
+        if exc.source_text is None:
+            exc.source_text = current_frame.source_text
+        if exc.pos is None and current_node is not None:
+            exc.pos = getattr(current_node, "pos", None)
+        if exc.stack:
+            return
+
+        stack: list[JSStackFrame] = []
+        for frame in reversed(self._execution_frames):
+            node = frame.node_stack[-1] if frame.node_stack else None
+            pos = getattr(node, "pos", None) if node is not None else None
+            line, column = _line_col_from_pos(frame.source_text, pos)
+            stack.append(
+                JSStackFrame(
+                    function_name=frame.function_name,
+                    source_name=frame.source_name,
+                    line=line,
+                    column=column,
+                )
+            )
+        exc.stack = stack
+
+    def _with_node(self, node: object, fn: Callable[[], Any]) -> Any:
+        if self._execution_frames:
+            self._execution_frames[-1].node_stack.append(node)
+        try:
+            return fn()
+        except JSError as exc:
+            self._annotate_error(exc)
+            raise
+        except JSThrow:
+            raise
+        finally:
+            if self._execution_frames and self._execution_frames[-1].node_stack:
+                self._execution_frames[-1].node_stack.pop()
 
     def _truthy(self, value: Any) -> bool:
         return _truthy(value)
@@ -636,151 +814,172 @@ class JSRuntime:
         return result
 
     def _eval_statement(self, stmt: Any, scope: Scope) -> Any:
-        if isinstance(stmt, BlockStatement):
-            return self._eval_block(stmt, scope)
+        def evaluate() -> Any:
+            if isinstance(stmt, BlockStatement):
+                return self._eval_block(stmt, scope)
 
-        if isinstance(stmt, VarDeclaration):
-            value = self._eval_expression(stmt.init, scope) if stmt.init is not None else None
-            scope.declare(stmt.name, value, is_const=(stmt.kind == "const"))
-            return value
+            if isinstance(stmt, VarDeclaration):
+                value = self._eval_expression(stmt.init, scope) if stmt.init is not None else None
+                scope.declare(stmt.name, value, is_const=(stmt.kind == "const"))
+                return value
 
-        if isinstance(stmt, FunctionDeclaration):
-            func = JSFunction(params=stmt.params, body=stmt.body, closure=scope)
-            scope.declare(stmt.name, func, is_const=False)
-            return func
+            if isinstance(stmt, FunctionDeclaration):
+                func = JSFunction(
+                    params=stmt.params,
+                    body=stmt.body,
+                    closure=scope,
+                    name=stmt.name,
+                    source_name=self._current_source_name,
+                    source_text=self._current_source_text,
+                )
+                scope.declare(stmt.name, func, is_const=False)
+                return func
 
-        if isinstance(stmt, ReturnStatement):
-            value = self._eval_expression(stmt.argument, scope) if stmt.argument is not None else None
-            raise JSReturn(value)
+            if isinstance(stmt, ReturnStatement):
+                value = self._eval_expression(stmt.argument, scope) if stmt.argument is not None else None
+                raise JSReturn(value)
 
-        if isinstance(stmt, ThrowStatement):
-            value = self._eval_expression(stmt.argument, scope)
-            raise JSThrow(value)
+            if isinstance(stmt, ThrowStatement):
+                value = self._eval_expression(stmt.argument, scope)
+                raise JSThrow(value)
 
-        if isinstance(stmt, IfStatement):
-            if _truthy(self._eval_expression(stmt.test, scope)):
-                return self._eval_statement(stmt.consequent, scope)
-            if stmt.alternate is not None:
-                return self._eval_statement(stmt.alternate, scope)
-            return None
+            if isinstance(stmt, IfStatement):
+                if _truthy(self._eval_expression(stmt.test, scope)):
+                    return self._eval_statement(stmt.consequent, scope)
+                if stmt.alternate is not None:
+                    return self._eval_statement(stmt.alternate, scope)
+                return None
 
-        if isinstance(stmt, WhileStatement):
-            result = None
-            while _truthy(self._eval_expression(stmt.test, scope)):
-                result = self._eval_statement(stmt.body, scope)
-            return result
+            if isinstance(stmt, WhileStatement):
+                result = None
+                while _truthy(self._eval_expression(stmt.test, scope)):
+                    result = self._eval_statement(stmt.body, scope)
+                return result
 
-        if isinstance(stmt, ForStatement):
-            loop_scope = Scope(parent=scope)
-            result = None
-            if stmt.init is not None:
-                if isinstance(stmt.init, VarDeclaration):
-                    self._eval_statement(stmt.init, loop_scope)
-                else:
-                    self._eval_expression(stmt.init, loop_scope)
-            while True:
-                if stmt.test is not None and not _truthy(self._eval_expression(stmt.test, loop_scope)):
-                    break
-                result = self._eval_statement(stmt.body, loop_scope)
-                if stmt.update is not None:
-                    self._eval_expression(stmt.update, loop_scope)
-            return result
+            if isinstance(stmt, ForStatement):
+                loop_scope = Scope(parent=scope)
+                result = None
+                if stmt.init is not None:
+                    if isinstance(stmt.init, VarDeclaration):
+                        self._eval_statement(stmt.init, loop_scope)
+                    else:
+                        self._eval_expression(stmt.init, loop_scope)
+                while True:
+                    if stmt.test is not None and not _truthy(self._eval_expression(stmt.test, loop_scope)):
+                        break
+                    result = self._eval_statement(stmt.body, loop_scope)
+                    if stmt.update is not None:
+                        self._eval_expression(stmt.update, loop_scope)
+                return result
 
-        if isinstance(stmt, TryCatchStatement):
-            try:
-                return self._eval_block(stmt.try_block, scope)
-            except JSThrow as exc:
-                catch_scope = Scope(parent=scope)
-                catch_scope.declare(stmt.catch_name, exc.value)
-                return self._eval_block(stmt.catch_block, catch_scope)
+            if isinstance(stmt, TryCatchStatement):
+                try:
+                    return self._eval_block(stmt.try_block, scope)
+                except JSThrow as exc:
+                    catch_scope = Scope(parent=scope)
+                    catch_scope.declare(stmt.catch_name, exc.value)
+                    return self._eval_block(stmt.catch_block, catch_scope)
 
-        if isinstance(stmt, ExpressionStatement):
-            return self._eval_expression(stmt.expression, scope)
+            if isinstance(stmt, ExpressionStatement):
+                return self._eval_expression(stmt.expression, scope)
 
-        raise JSError(f"Unsupported statement type: {type(stmt).__name__}")
+            raise JSError(f"Unsupported statement type: {type(stmt).__name__}")
+
+        return self._with_node(stmt, evaluate)
 
     def _eval_expression(self, expr: Any, scope: Scope) -> Any:
         if expr is None:
             return None
 
-        if isinstance(expr, Literal):
-            return expr.value
+        def evaluate() -> Any:
+            if isinstance(expr, Literal):
+                return expr.value
 
-        if isinstance(expr, Identifier):
-            return scope.get(expr.name)
+            if isinstance(expr, Identifier):
+                return scope.get(expr.name)
 
-        if isinstance(expr, ArrayLiteral):
-            return [self._eval_expression(item, scope) for item in expr.elements]
+            if isinstance(expr, ArrayLiteral):
+                return [self._eval_expression(item, scope) for item in expr.elements]
 
-        if isinstance(expr, ObjectLiteral):
-            obj: dict[str, Any] = {}
-            for prop in expr.properties:
-                obj[prop.key] = self._eval_expression(prop.value, scope)
-            return obj
+            if isinstance(expr, ObjectLiteral):
+                obj: dict[str, Any] = {}
+                for prop in expr.properties:
+                    obj[prop.key] = self._eval_expression(prop.value, scope)
+                return obj
 
-        if isinstance(expr, FunctionExpression):
-            return JSFunction(params=expr.params, body=expr.body, closure=scope, is_arrow=expr.is_arrow)
+            if isinstance(expr, FunctionExpression):
+                return JSFunction(
+                    params=expr.params,
+                    body=expr.body,
+                    closure=scope,
+                    is_arrow=expr.is_arrow,
+                    name=expr.name or "<anonymous>",
+                    source_name=self._current_source_name,
+                    source_text=self._current_source_text,
+                )
 
-        if isinstance(expr, SequenceExpression):
-            result = None
-            for sequence_expr in expr.expressions:
-                result = self._eval_expression(sequence_expr, scope)
-            return result
+            if isinstance(expr, SequenceExpression):
+                result = None
+                for sequence_expr in expr.expressions:
+                    result = self._eval_expression(sequence_expr, scope)
+                return result
 
-        if isinstance(expr, UnaryExpression):
-            arg = self._eval_expression(expr.argument, scope)
-            return _apply_unary(expr.op, arg)
+            if isinstance(expr, UnaryExpression):
+                arg = self._eval_expression(expr.argument, scope)
+                return _apply_unary(expr.op, arg)
 
-        if isinstance(expr, BinaryExpression):
-            if expr.op == "||":
+            if isinstance(expr, BinaryExpression):
+                if expr.op == "||":
+                    left = self._eval_expression(expr.left, scope)
+                    return left if _truthy(left) else self._eval_expression(expr.right, scope)
+
+                if expr.op == "&&":
+                    left = self._eval_expression(expr.left, scope)
+                    return self._eval_expression(expr.right, scope) if _truthy(left) else left
+
+                if expr.op == "??":
+                    left = self._eval_expression(expr.left, scope)
+                    return left if left is not None else self._eval_expression(expr.right, scope)
+
                 left = self._eval_expression(expr.left, scope)
-                return left if _truthy(left) else self._eval_expression(expr.right, scope)
+                right = self._eval_expression(expr.right, scope)
+                return _apply_binary(expr.op, left, right)
 
-            if expr.op == "&&":
-                left = self._eval_expression(expr.left, scope)
-                return self._eval_expression(expr.right, scope) if _truthy(left) else left
+            if isinstance(expr, ConditionalExpression):
+                return (
+                    self._eval_expression(expr.consequent, scope)
+                    if _truthy(self._eval_expression(expr.test, scope))
+                    else self._eval_expression(expr.alternate, scope)
+                )
 
-            if expr.op == "??":
-                left = self._eval_expression(expr.left, scope)
-                return left if left is not None else self._eval_expression(expr.right, scope)
+            if isinstance(expr, MemberExpression):
+                obj = self._eval_expression(expr.obj, scope)
+                if expr.optional and obj is None:
+                    return None
+                prop_value = self._eval_expression(expr.prop, scope)
+                return _get_property(obj, prop_value)
 
-            left = self._eval_expression(expr.left, scope)
-            right = self._eval_expression(expr.right, scope)
-            return _apply_binary(expr.op, left, right)
+            if isinstance(expr, AssignmentExpression):
+                value = self._eval_expression(expr.value, scope)
+                if isinstance(expr.target, Identifier):
+                    scope.assign(expr.target.name, value)
+                    return value
+                if isinstance(expr.target, MemberExpression):
+                    obj = self._eval_expression(expr.target.obj, scope)
+                    if expr.target.optional and obj is None:
+                        raise JSError("TypeError: Cannot set property on null with optional chain")
+                    prop_value = self._eval_expression(expr.target.prop, scope)
+                    _set_property(obj, prop_value, value)
+                    return value
+                raise JSError("Invalid assignment target")
 
-        if isinstance(expr, ConditionalExpression):
-            return (
-                self._eval_expression(expr.consequent, scope)
-                if _truthy(self._eval_expression(expr.test, scope))
-                else self._eval_expression(expr.alternate, scope)
-            )
+            if isinstance(expr, CallExpression):
+                callee = self._eval_expression(expr.callee, scope)
+                if expr.optional and callee is None:
+                    return None
+                args = [self._eval_expression(arg, scope) for arg in expr.args]
+                return self._call(callee, args)
 
-        if isinstance(expr, MemberExpression):
-            obj = self._eval_expression(expr.obj, scope)
-            if expr.optional and obj is None:
-                return None
-            prop_value = self._eval_expression(expr.prop, scope)
-            return _get_property(obj, prop_value)
+            raise JSError(f"Unsupported expression type: {type(expr).__name__}")
 
-        if isinstance(expr, AssignmentExpression):
-            value = self._eval_expression(expr.value, scope)
-            if isinstance(expr.target, Identifier):
-                scope.assign(expr.target.name, value)
-                return value
-            if isinstance(expr.target, MemberExpression):
-                obj = self._eval_expression(expr.target.obj, scope)
-                if expr.target.optional and obj is None:
-                    raise JSError("TypeError: Cannot set property on null with optional chain")
-                prop_value = self._eval_expression(expr.target.prop, scope)
-                _set_property(obj, prop_value, value)
-                return value
-            raise JSError("Invalid assignment target")
-
-        if isinstance(expr, CallExpression):
-            callee = self._eval_expression(expr.callee, scope)
-            if expr.optional and callee is None:
-                return None
-            args = [self._eval_expression(arg, scope) for arg in expr.args]
-            return self._call(callee, args)
-
-        raise JSError(f"Unsupported expression type: {type(expr).__name__}")
+        return self._with_node(expr, evaluate)

@@ -76,6 +76,63 @@ class EngineIntegrationUsageTests(unittest.TestCase):
         self.assertEqual(title, "Loaded")
         self.assertIn("http://example.com/app.js", loaded)
 
+    def test_external_script_error_reaches_js_console_with_source_context(self):
+        sink = RecordingSink()
+        console_lines = []
+
+        def loader(url):
+            if url.endswith("app.js"):
+                return (
+                    "function throwErrorNoHandle() {\n"
+                    "  notDefinedFunction();\n"
+                    "}\n"
+                    "throwErrorNoHandle();\n",
+                    "http://example.com/assets/app.js",
+                )
+            return "", url
+
+        renderer = Vivienne(
+            sink=sink,
+            settings={"css_enabled": True, "js_enabled": True},
+            resource_loader=loader,
+            js_console_sink=console_lines.append,
+        )
+
+        renderer.render("<script src='app.js'></script>", base_url="http://example.com/")
+
+        self.assertEqual(len(console_lines), 1)
+        self.assertIn("Uncaught ReferenceError: notDefinedFunction is not defined", console_lines[0])
+        self.assertIn("throwErrorNoHandle http://example.com/assets/app.js:2", console_lines[0])
+        self.assertIn("Source context:", console_lines[0])
+
+    def test_external_script_syntax_error_reaches_js_console_with_source_context(self):
+        sink = RecordingSink()
+        console_lines = []
+
+        def loader(url):
+            if url.endswith("app.js"):
+                return (
+                    "function broken() {\n"
+                    "  console.log((value) => 1 + ;\n"
+                    "}\n",
+                    "http://example.com/assets/app.js",
+                )
+            return "", url
+
+        renderer = Vivienne(
+            sink=sink,
+            settings={"css_enabled": True, "js_enabled": True},
+            resource_loader=loader,
+            js_console_sink=console_lines.append,
+        )
+
+        renderer.render("<script src='app.js'></script>", base_url="http://example.com/")
+
+        self.assertEqual(len(console_lines), 1)
+        self.assertIn("Uncaught SyntaxError: Unexpected token punct:;", console_lines[0])
+        self.assertIn("<parse> http://example.com/assets/app.js:2", console_lines[0])
+        self.assertIn("Source context:", console_lines[0])
+
     def test_external_stylesheet_loaded_when_css_enabled(self):
         sink = RecordingSink()
 

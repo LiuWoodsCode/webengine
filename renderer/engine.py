@@ -1,6 +1,6 @@
 import logging
 
-from js import DocumentBridge, JSRuntime, LocationBridge, default_globals
+from js import DocumentBridge, JSError, JSParseError, JSRuntime, LocationBridge, default_globals
 
 from .css import compute_styles, parse_css_stylesheet
 from .display_list import build_display_list
@@ -102,8 +102,9 @@ class Vivienne:
             )
         )
 
-        script_sources: list[str] = []
-        script_sources.extend(meta.inline_scripts)
+        script_sources: list[tuple[str, str]] = []
+        inline_source_name = base_url or "<inline-script>"
+        script_sources.extend((script, inline_source_name) for script in meta.inline_scripts)
 
         if self.resource_loader:
             for res in resources:
@@ -111,16 +112,19 @@ class Vivienne:
                     continue
                 try:
                     text, final_url = self.resource_loader(res.url)
-                    script_sources.append(text)
+                    script_sources.append((text, final_url))
                     log.info("loaded script: %s", final_url)
                 except Exception:
                     log.warning("script load failed: %s", res.url, exc_info=True)
 
-        for script in script_sources:
+        for script, source_name in script_sources:
             if not script.strip():
                 continue
             try:
-                runtime.execute(script)
+                runtime.execute(script, source_name=source_name)
+            except (JSParseError, JSError) as exc:
+                self._emit_js_console(exc.format_for_console())
+                js_log.warning("script execution failed: %s", exc)
             except Exception:
                 js_log.warning("script execution failed", exc_info=True)
 

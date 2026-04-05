@@ -40,14 +40,18 @@ def main(argv: list[str] | None = None) -> int:
 	try:
 		source = _read_source(args.file)
 		runtime = JSRuntime(default_globals(console_logger=print))
-		result = runtime.execute(source)
+		source_name = args.file if args.file and args.file != "-" else "<stdin>"
+		result = runtime.execute(source, source_name=source_name)
 		if result is not None:
 			print(_to_output_text(result))
 		return 0
 	except FileNotFoundError as exc:
 		print(f"medrano: file not found: {exc.filename}", file=sys.stderr)
 		return 1
-	except (JSParseError, JSError, ValueError) as exc:
+	except (JSParseError, JSError) as exc:
+		print(exc.format_for_console(), file=sys.stderr)
+		return 1
+	except ValueError as exc:
 		print(f"medrano: {exc}", file=sys.stderr)
 		return 1
 

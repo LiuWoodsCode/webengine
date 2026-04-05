@@ -1,6 +1,7 @@
 import unittest
 
 from js.builtins import DocumentBridge, LocationBridge, default_globals
+from js import JSParseError
 from js.runtime import JSError, JSObject, JSRuntime
 
 
@@ -74,6 +75,46 @@ class JSRuntimeTests(unittest.TestCase):
         runtime = JSRuntime()
         result = runtime.execute("var handlers = {click: () => 7}; handlers.click();")
         self.assertEqual(result, 7)
+
+    def test_runtime_error_includes_stack_and_source_context(self):
+        runtime = JSRuntime()
+        source = (
+            "function throwErrorNoHandle() {\n"
+            "  notDefinedFunction();\n"
+            "}\n"
+            "throwErrorNoHandle();\n"
+        )
+
+        with self.assertRaises(JSError) as ctx:
+            runtime.execute(source, source_name="http://localhost:8000/inspection/javascript.html")
+
+        formatted = ctx.exception.format_for_console()
+        self.assertIn("Uncaught ReferenceError: notDefinedFunction is not defined", formatted)
+        self.assertIn(
+            "throwErrorNoHandle http://localhost:8000/inspection/javascript.html:2",
+            formatted,
+        )
+        self.assertIn("<global> http://localhost:8000/inspection/javascript.html:4", formatted)
+        self.assertIn("Source context:", formatted)
+        self.assertIn("> 2 |   notDefinedFunction();", formatted)
+        self.assertIn("^", formatted)
+
+    def test_syntax_error_includes_source_context(self):
+        runtime = JSRuntime()
+        source = (
+            "function broken() {\n"
+            "  console.log((value) => 1 + ;\n"
+            "}\n"
+        )
+
+        with self.assertRaises(JSParseError) as ctx:
+            runtime.execute(source, source_name="http://localhost:8000/inspection/javascript.html")
+
+        formatted = ctx.exception.format_for_console()
+        self.assertIn("Uncaught SyntaxError: Unexpected token punct:;", formatted)
+        self.assertIn("<parse> http://localhost:8000/inspection/javascript.html:2", formatted)
+        self.assertIn("> 2 |   console.log((value) => 1 + ;", formatted)
+        self.assertIn("^", formatted)
 
 
 if __name__ == "__main__":
